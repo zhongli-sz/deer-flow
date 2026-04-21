@@ -82,18 +82,23 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
         context = runtime.context or {}
-        thread_id = context.get("thread_id")
-        if thread_id is None:
-            config = get_config()
-            thread_id = config.get("configurable", {}).get("thread_id")
+
+        runnable_cfg: dict = {}
+        try:
+            runnable_cfg = get_config() or {}
+        except RuntimeError:
+            # Unit tests and non-graph call sites invoke ``before_agent`` with only
+            # ``runtime.context`` — there is no LangGraph runnable frame.
+            runnable_cfg = {}
+
+        thread_id = context.get("thread_id") or runnable_cfg.get("configurable", {}).get("thread_id")
 
         if thread_id is None:
             raise ValueError("Thread ID is required in runtime context or config.configurable")
 
-        config = get_config()
         tenant_id = context.get("tenant_id")
         if not isinstance(tenant_id, str) or not tenant_id.strip():
-            configurable_tenant_id = config.get("configurable", {}).get("tenant_id")
+            configurable_tenant_id = runnable_cfg.get("configurable", {}).get("tenant_id")
             tenant_id = configurable_tenant_id if isinstance(configurable_tenant_id, str) and configurable_tenant_id.strip() else None
 
         if self._lazy_init:
