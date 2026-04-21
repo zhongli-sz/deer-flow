@@ -622,6 +622,46 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_handle_chat_partition_im_users_injects_configurable(self):
+        from deerflow.config.im_partition import sanitize_im_user_id
+
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                partition_im_users_default=True,
+                channel_partition={"telegram": True},
+            )
+
+            outbound_received: list = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user-wecom-a", text="hi")
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_called_once()
+            call_args = mock_client.runs.wait.call_args
+            cfg = call_args[1]["config"]["configurable"]
+            assert cfg["thread_id"] == "test-thread-123"
+            assert cfg["im_partition_key"] == sanitize_im_user_id("user-wecom-a")
+
+        _run(go())
+
     def test_handle_chat_rejects_invalid_custom_agent_name(self):
         from app.channels.manager import ChannelManager
 

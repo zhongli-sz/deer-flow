@@ -785,6 +785,9 @@ checkpointer:
 #   # langgraph_url: http://langgraph:2024
 #   # gateway_url: http://gateway:8001
 #   # You can also set DEER_FLOW_CHANNELS_LANGGRAPH_URL / DEER_FLOW_CHANNELS_GATEWAY_URL.
+#   #
+#   # Per-IM-user data under {DEER_FLOW_HOME}/im_users/<sha256>/ (memory, agent SOUL, threads).
+#   # partition_im_users: false
 #
 #   # Optional: default mobile/session settings for all IM channels
 #   session:

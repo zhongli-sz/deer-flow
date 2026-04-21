@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import contextmanager
 import mimetypes
 import re
 import time
@@ -522,6 +523,8 @@ class ChannelManager:
         assistant_id: str = DEFAULT_ASSISTANT_ID,
         default_session: dict[str, Any] | None = None,
         channel_sessions: dict[str, Any] | None = None,
+        partition_im_users_default: bool = False,
+        channel_partition: dict[str, bool] | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -531,10 +534,42 @@ class ChannelManager:
         self._assistant_id = assistant_id
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
+        self._partition_im_users_default = partition_im_users_default
+        self._channel_partition = dict(channel_partition or {})
         self._client = None  # lazy init — langgraph_sdk async client
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         self._task: asyncio.Task | None = None
+
+    def _partition_enabled(self, msg: InboundMessage) -> bool:
+        """Whether IM user filesystem partitioning applies to this channel."""
+        ch = self._channel_partition.get(msg.channel_name)
+        if isinstance(ch, bool):
+            return ch
+        return self._partition_im_users_default
+
+    @contextmanager
+    def _partition_paths_scope(self, msg: InboundMessage):
+        """Route host-side file helpers (uploads, artifact paths) under im_users/ when enabled."""
+        if not self._partition_enabled(msg):
+            yield
+            return
+        uid = str(msg.user_id or "").strip()
+        if not uid:
+            raise InvalidChannelSessionConfigError(
+                "partition_im_users is enabled for this channel but the inbound message has no user_id."
+            )
+        from deerflow.config import path_context
+        from deerflow.config.im_partition import im_user_root, sanitize_im_user_id
+        from deerflow.config.paths import Paths, get_paths
+
+        safe = sanitize_im_user_id(uid)
+        part = Paths(base_dir=im_user_root(get_paths().base_dir, safe))
+        token = path_context.set_partition_paths(part)
+        try:
+            yield
+        finally:
+            path_context.reset_partition_paths(token)
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -574,6 +609,24 @@ class ChannelManager:
         if assistant_id != DEFAULT_ASSISTANT_ID:
             run_context.setdefault("agent_name", _normalize_custom_agent_name(assistant_id))
             assistant_id = DEFAULT_ASSISTANT_ID
+
+        configurable: dict[str, Any] = {}
+        for layer in (self._default_session.get("config"), channel_layer.get("config"), user_layer.get("config")):
+            if isinstance(layer, Mapping):
+                nested = layer.get("configurable")
+                if isinstance(nested, dict):
+                    configurable.update(nested)
+        configurable["thread_id"] = thread_id
+        if self._partition_enabled(msg):
+            uid = str(msg.user_id or "").strip()
+            if not uid:
+                raise InvalidChannelSessionConfigError(
+                    "partition_im_users is enabled for this channel but the inbound message has no user_id."
+                )
+            from deerflow.config.im_partition import sanitize_im_user_id
+
+            configurable["im_partition_key"] = sanitize_im_user_id(uid)
+        run_config["configurable"] = configurable
 
         return assistant_id, run_config, run_context
 
@@ -647,7 +700,8 @@ class ChannelManager:
                 if msg.msg_type == InboundMessageType.COMMAND:
                     await self._handle_command(msg)
                 else:
-                    await self._handle_chat(msg)
+                    with self._partition_paths_scope(msg):
+                        await self._handle_chat(msg)
             except InvalidChannelSessionConfigError as exc:
                 logger.warning(
                     "Invalid channel session config for %s (chat=%s): %s",
