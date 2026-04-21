@@ -47,6 +47,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
       - [Sandbox 模式](#sandbox-模式)
       - [MCP Server](#mcp-server)
       - [IM 渠道](#im-渠道)
+      - [IM 多用户数据分区（可选）](#im-多用户数据分区可选)
       - [LangSmith 链路追踪](#langsmith-链路追踪)
   - [从 Deep Research 到 Super Agent Harness](#从-deep-research-到-super-agent-harness)
   - [核心特性](#核心特性)
@@ -309,6 +310,16 @@ channels:
 说明：
 - `assistant_id: lead_agent` 会直接调用默认的 LangGraph assistant。
 - 如果 `assistant_id` 填的是自定义 agent 名，DeerFlow 仍然会走 `lead_agent`，同时把该值注入为 `agent_name`，这样 IM 渠道也会生效对应 agent 的 SOUL 和配置。
+
+##### IM 多用户数据分区（可选）
+
+适用于「同一套部署、同一机器人」下要让**不同终端用户**的长期记忆、自定义 Agent 目录（含 SOUL）、对话线程数据等**互不共享**的场景（例如企业微信按成员 `userid` 区分）。
+
+- **开关**：在 `channels` 下设置 `partition_im_users: true` 表示默认对**已启用的 IM 渠道**启用分区；也可在单个渠道（如 `wecom`）下单独写 `partition_im_users: true` / `false` 覆盖默认值。
+- **分区键**：由渠道从平台载荷解析出的 **用户 ID**（企业微信侧为 `from.userid` 等），经 **SHA-256 十六进制（64 字符）** 映射到目录名，写入 LangGraph 运行的 `configurable.im_partition_key`，请勿由终端用户文本自行伪造。
+- **数据目录**：在 `DEER_FLOW_HOME`（或容器内等价根路径）下为每个用户生成独立子树，形如 `im_users/<64位hex>/`，其下包含该用户的 `memory.json`、`agents/<名称>/`、`threads/<thread_id>/` 等，与全局 Web 会话默认使用的根目录分离；**Web 前端与未带分区信息的 HTTP 调用**仍走原有全局数据根，除非你自己在请求里传入与 IM 一致的分区信息。
+- **Gateway 记忆 API**：调用 `GET /api/memory`（及其他 `/api/memory/*`）时，可附带请求头 **`X-DeerFlow-IM-Partition`**，取值与 **`im_partition_key`** 相同（64 位 hex）。这样在运维脚本或自建后台里查看、导入导出记忆时，会与对应 IM 用户磁盘数据一致。IM 侧 `/memory` 命令在启用分区且消息带 `user_id` 时，会自动向 Gateway 带上该请求头。
+- **设计细节** 见仓库内文档：[`docs/superpowers/specs/2026-04-21-enterprise-im-per-user-data-design.md`](docs/superpowers/specs/2026-04-21-enterprise-im-per-user-data-design.md)。
 
 在 `.env` 里设置对应的 API key：
 

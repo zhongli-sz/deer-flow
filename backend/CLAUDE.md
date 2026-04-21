@@ -339,6 +339,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
 - In Docker Compose, IM channels run inside the `gateway` container, so `localhost` points back to that container. Use `http://langgraph:2024` / `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` / `DEER_FLOW_CHANNELS_GATEWAY_URL`.
 - Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token)
+- **Optional per-user IM partitioning**: `channels.partition_im_users` (and per-channel override) injects `configurable.im_partition_key` (SHA-256 hex of platform user id) into LangGraph runs and scopes host-side uploads/artifacts under `DEER_FLOW_HOME/im_users/<hex>/`. Gateway `GET /api/memory` can take header `X-DeerFlow-IM-Partition` for the same scope; see `app/gateway/routers/memory.py`. Spec: `docs/superpowers/specs/2026-04-21-enterprise-im-per-user-data-design.md`.
 
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 
@@ -347,7 +348,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 - `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time)
 - `prompt.py` - Prompt templates for memory updates
 
-**Data Structure** (stored in `backend/.deer-flow/memory.json`):
+**Data Structure** (stored in `backend/.deer-flow/memory.json` when using the default relative path; under `im_users/<partition>/memory.json` when IM partitioning is active for that user):
 - **User Context**: `workContext`, `personalContext`, `topOfMind` (1-3 sentence summaries)
 - **History**: `recentMonths`, `earlierContext`, `longTermBackground`
 - **Facts**: Discrete facts with `id`, `content`, `category` (preference/knowledge/context/behavior/goal), `confidence` (0-1), `createdAt`, `source`

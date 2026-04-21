@@ -60,6 +60,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
       - [Sandbox Mode](#sandbox-mode)
       - [MCP Server](#mcp-server)
       - [IM Channels](#im-channels)
+      - [IM per-user data partitioning (optional)](#im-per-user-data-partitioning-optional)
       - [LangSmith Tracing](#langsmith-tracing)
       - [Langfuse Tracing](#langfuse-tracing)
       - [Using Both Providers](#using-both-providers)
@@ -444,6 +445,16 @@ channels:
 Notes:
 - `assistant_id: lead_agent` calls the default LangGraph assistant directly.
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
+
+##### IM per-user data partitioning (optional)
+
+Use this when a **single deployment and bot** must keep **long-term memory, custom agent directories (including SOUL), thread workspace data, and related files isolated per end user** (for example WeCom members identified by platform `userid`).
+
+- **Enable**: set `partition_im_users: true` under `channels` as the default for enabled IM channels, or set `partition_im_users` on an individual channel (such as `wecom`) to override.
+- **Partition key**: derived from the **user id parsed by the channel integration** (never from free-form chat text). It is stored as a **64-character lowercase hex SHA-256 digest** in LangGraph `configurable.im_partition_key`.
+- **Layout**: under `DEER_FLOW_HOME` (or the container-equivalent root), each user gets `im_users/<64-hex>/` with their own `memory.json`, `agents/<name>/`, `threads/<thread_id>/`, and so on. Requests from the **web UI** or **HTTP APIs without partition context** still use the global data root unless you supply the same key explicitly.
+- **Gateway memory API**: `GET /api/memory` and other `/api/memory/*` routes accept optional header **`X-DeerFlow-IM-Partition`** with the same hex value as `im_partition_key`, so automation and admin tools read the same on-disk memory as IM runs. The IM `/memory` command adds this header automatically when partitioning is enabled and the inbound message carries a `user_id`.
+- **Design reference**: [`docs/superpowers/specs/2026-04-21-enterprise-im-per-user-data-design.md`](docs/superpowers/specs/2026-04-21-enterprise-im-per-user-data-design.md).
 
 Set the corresponding API keys in your `.env` file:
 
