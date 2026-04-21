@@ -39,3 +39,18 @@ def test_get_paths_uses_partition_override(tmp_path, monkeypatch):
     assert get_paths().base_dir == part.base_dir
     path_context.reset_partition_paths(token)
     assert get_paths().base_dir == tmp_path
+
+
+def test_get_paths_without_partition_ignores_context_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    paths_module._paths = None
+    safe = sanitize_im_user_id("user-wecom-1")
+    part = Paths(base_dir=im_user_root(tmp_path, safe))
+    token = path_context.set_partition_paths(part)
+    try:
+        assert paths_module.get_paths_without_partition().base_dir == tmp_path
+        assert get_paths().base_dir == part.base_dir
+    finally:
+        path_context.reset_partition_paths(token)

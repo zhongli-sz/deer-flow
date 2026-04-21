@@ -2,17 +2,49 @@
 
 import logging
 import re
+import shutil
 from typing import Any
 
 import yaml
 from pydantic import BaseModel
 
-from deerflow.config.paths import get_paths
+from deerflow.config.paths import get_paths, get_paths_without_partition
 
 logger = logging.getLogger(__name__)
 
 SOUL_FILENAME = "SOUL.md"
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+
+
+def ensure_partitioned_custom_agent_seed(configurable: dict[str, Any], agent_name: str | None) -> None:
+    """Copy global ``agents/<name>/`` into the partitioned tree when IM user data is active.
+
+    Called while ``get_paths()`` points at ``.../im_users/<key>/`` so ``load_agent_*`` resolves
+    per-user copies. Templates are always read from the deployment root via
+    :func:`get_paths_without_partition`.
+    """
+    if not agent_name:
+        return
+    partition_key = configurable.get("im_partition_key")
+    if not partition_key or not isinstance(partition_key, str):
+        return
+    validate_agent_name(agent_name)
+    template_root = get_paths_without_partition().agent_dir(agent_name)
+    if not template_root.is_dir():
+        return
+
+    dest_root = get_paths().agent_dir(agent_name)
+    if not dest_root.exists():
+        shutil.copytree(template_root, dest_root)
+        logger.info("Seeded custom agent %r into partitioned dir %s", agent_name, dest_root)
+        return
+
+    for fname in (SOUL_FILENAME, "config.yaml"):
+        src = template_root / fname
+        dst = dest_root / fname
+        if src.is_file() and not dst.exists():
+            shutil.copy2(src, dst)
+            logger.info("Seeded missing %s for agent %r under %s", fname, agent_name, dest_root)
 
 
 def validate_agent_name(name: str | None) -> str | None:

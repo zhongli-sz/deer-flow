@@ -1,4 +1,5 @@
 import logging
+from contextlib import contextmanager
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -17,7 +18,7 @@ from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddlew
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import ensure_partitioned_custom_agent_seed, load_agent_config, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.summarization_config import get_summarization_config
@@ -277,6 +278,29 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     return middlewares
 
 
+@contextmanager
+def _lead_agent_partition_scope(cfg: dict):
+    """Point path resolution at ``im_users/<key>/`` when *im_partition_key* is in the run config.
+
+    :func:`make_lead_agent` runs before graph middleware, so we set the same ContextVar
+    the :class:`PartitionPathsMiddleware` uses for the duration of config and prompt loading.
+    """
+    key = cfg.get("im_partition_key")
+    if not key or not isinstance(key, str):
+        yield
+        return
+    from deerflow.config import path_context
+    from deerflow.config.im_partition import im_user_root
+    from deerflow.config.paths import Paths, get_paths_without_partition
+
+    part = Paths(base_dir=im_user_root(get_paths_without_partition().base_dir, key))
+    token = path_context.set_partition_paths(part)
+    try:
+        yield
+    finally:
+        path_context.reset_partition_paths(token)
+
+
 def make_lead_agent(config: RunnableConfig):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
@@ -293,66 +317,69 @@ def make_lead_agent(config: RunnableConfig):
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
-    agent_config = load_agent_config(agent_name) if not is_bootstrap else None
-    # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
-    agent_model_name = agent_config.model if agent_config and agent_config.model else None
+    with _lead_agent_partition_scope(cfg):
+        ensure_partitioned_custom_agent_seed(cfg, agent_name)
 
-    # Final model name resolution: request → agent config → global default, with fallback for unknown names
-    model_name = _resolve_model_name(requested_model_name or agent_model_name)
+        agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+        # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
+        agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
-    app_config = get_app_config()
-    model_config = app_config.get_model_config(model_name)
+        # Final model name resolution: request → agent config → global default, with fallback for unknown names
+        model_name = _resolve_model_name(requested_model_name or agent_model_name)
 
-    if model_config is None:
-        raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
-    if thinking_enabled and not model_config.supports_thinking:
-        logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
-        thinking_enabled = False
+        app_config = get_app_config()
+        model_config = app_config.get_model_config(model_name)
 
-    logger.info(
-        "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
-        agent_name or "default",
-        thinking_enabled,
-        reasoning_effort,
-        model_name,
-        is_plan_mode,
-        subagent_enabled,
-        max_concurrent_subagents,
-    )
+        if model_config is None:
+            raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
+        if thinking_enabled and not model_config.supports_thinking:
+            logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
+            thinking_enabled = False
 
-    # Inject run metadata for LangSmith trace tagging
-    if "metadata" not in config:
-        config["metadata"] = {}
-
-    config["metadata"].update(
-        {
-            "agent_name": agent_name or "default",
-            "model_name": model_name or "default",
-            "thinking_enabled": thinking_enabled,
-            "reasoning_effort": reasoning_effort,
-            "is_plan_mode": is_plan_mode,
-            "subagent_enabled": subagent_enabled,
-            "tool_groups": agent_config.tool_groups if agent_config else None,
-        }
-    )
-
-    if is_bootstrap:
-        # Special bootstrap agent with minimal prompt for initial custom agent creation flow
-        return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
-            tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
-            middleware=_build_middlewares(config, model_name=model_name),
-            system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
-            state_schema=ThreadState,
+        logger.info(
+            "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+            agent_name or "default",
+            thinking_enabled,
+            reasoning_effort,
+            model_name,
+            is_plan_mode,
+            subagent_enabled,
+            max_concurrent_subagents,
         )
 
-    # Default lead agent (unchanged behavior)
-    return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
-        tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
-        system_prompt=apply_prompt_template(
-            subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None
-        ),
-        state_schema=ThreadState,
-    )
+        # Inject run metadata for LangSmith trace tagging
+        if "metadata" not in config:
+            config["metadata"] = {}
+
+        config["metadata"].update(
+            {
+                "agent_name": agent_name or "default",
+                "model_name": model_name or "default",
+                "thinking_enabled": thinking_enabled,
+                "reasoning_effort": reasoning_effort,
+                "is_plan_mode": is_plan_mode,
+                "subagent_enabled": subagent_enabled,
+                "tool_groups": agent_config.tool_groups if agent_config else None,
+            }
+        )
+
+        if is_bootstrap:
+            # Special bootstrap agent with minimal prompt for initial custom agent creation flow
+            return create_agent(
+                model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
+                tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
+                middleware=_build_middlewares(config, model_name=model_name),
+                system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
+                state_schema=ThreadState,
+            )
+
+        # Default lead agent (unchanged behavior)
+        return create_agent(
+            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
+            tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
+            middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
+            system_prompt=apply_prompt_template(
+                subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None
+            ),
+            state_schema=ThreadState,
+        )

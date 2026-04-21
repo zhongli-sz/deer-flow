@@ -163,7 +163,7 @@ def _assemble_from_features(
 
     Middleware order matches ``make_lead_agent`` (14 middlewares):
 
-      0-2. Sandbox infrastructure (ThreadData → Uploads → Sandbox)
+      0-3. Sandbox infrastructure (PartitionPaths → ThreadData → Uploads → Sandbox)
       3.   DanglingToolCallMiddleware (always)
       4.   GuardrailMiddleware (guardrail feature)
       5.   ToolErrorHandlingMiddleware (always)
@@ -194,10 +194,12 @@ def _assemble_from_features(
         if isinstance(feat.sandbox, AgentMiddleware):
             chain.append(feat.sandbox)
         else:
+            from deerflow.agents.middlewares.partition_paths_middleware import PartitionPathsMiddleware
             from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
             from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
             from deerflow.sandbox.middleware import SandboxMiddleware
 
+            chain.append(PartitionPathsMiddleware())
             chain.append(ThreadDataMiddleware(lazy_init=True))
             chain.append(UploadsMiddleware())
             chain.append(SandboxMiddleware(lazy_init=True))

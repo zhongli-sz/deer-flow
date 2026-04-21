@@ -734,6 +734,7 @@ def test_full_chain_order(mock_create_agent):
     mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
 
     expected_order = [
+        "PartitionPathsMiddleware",
         "ThreadDataMiddleware",
         "UploadsMiddleware",
         "SandboxMiddleware",

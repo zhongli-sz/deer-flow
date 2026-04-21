@@ -286,6 +286,18 @@ class Paths:
 _paths: Paths | None = None
 
 
+def get_paths_without_partition() -> Paths:
+    """Return the deployment data-root Paths singleton, ignoring im_users partition overrides.
+
+    Used when reading global templates (e.g. seeding ``agents/<name>/`` into a user subtree)
+    while a partition ContextVar may be active for ``get_paths()``.
+    """
+    global _paths
+    if _paths is None:
+        _paths = Paths()
+    return _paths
+
+
 def get_paths() -> Paths:
     """Return the global Paths singleton (lazy-initialized)."""
     from . import path_context
@@ -293,10 +305,7 @@ def get_paths() -> Paths:
     override = path_context.partition_paths_ctx.get()
     if override is not None:
         return override
-    global _paths
-    if _paths is None:
-        _paths = Paths()
-    return _paths
+    return get_paths_without_partition()
 
 
 def resolve_path(path: str) -> Path:
