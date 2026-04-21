@@ -64,9 +64,10 @@ class FileMemoryStorage(MemoryStorage):
 
     def __init__(self):
         """Initialize the file memory storage."""
-        # Per-agent memory cache: keyed by agent_name (None = global)
+        # Cache keyed by resolved memory file path so global vs. ``im_users/`` partition
+        # and per-agent files do not collide.
         # Value: (memory_data, file_mtime)
-        self._memory_cache: dict[str | None, tuple[dict[str, Any], float | None]] = {}
+        self._memory_cache: dict[str, tuple[dict[str, Any], float | None]] = {}
         # Guards all reads and writes to _memory_cache across concurrent callers.
         self._cache_lock = threading.Lock()
 
@@ -93,6 +94,9 @@ class FileMemoryStorage(MemoryStorage):
             return p if p.is_absolute() else get_paths().base_dir / p
         return get_paths().memory_file
 
+    def _cache_key(self, agent_name: str | None = None) -> str:
+        return str(self._get_memory_file_path(agent_name).resolve())
+
     def _load_memory_from_file(self, agent_name: str | None = None) -> dict[str, Any]:
         """Load memory data from file."""
         file_path = self._get_memory_file_path(agent_name)
@@ -117,15 +121,16 @@ class FileMemoryStorage(MemoryStorage):
         except OSError:
             current_mtime = None
 
+        key = self._cache_key(agent_name)
         with self._cache_lock:
-            cached = self._memory_cache.get(agent_name)
+            cached = self._memory_cache.get(key)
             if cached is not None and cached[1] == current_mtime:
                 return cached[0]
 
         memory_data = self._load_memory_from_file(agent_name)
 
         with self._cache_lock:
-            self._memory_cache[agent_name] = (memory_data, current_mtime)
+            self._memory_cache[key] = (memory_data, current_mtime)
 
         return memory_data
 
@@ -139,8 +144,9 @@ class FileMemoryStorage(MemoryStorage):
         except OSError:
             mtime = None
 
+        ck = self._cache_key(agent_name)
         with self._cache_lock:
-            self._memory_cache[agent_name] = (memory_data, mtime)
+            self._memory_cache[ck] = (memory_data, mtime)
         return memory_data
 
     def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
@@ -165,8 +171,9 @@ class FileMemoryStorage(MemoryStorage):
             except OSError:
                 mtime = None
 
+            ck = self._cache_key(agent_name)
             with self._cache_lock:
-                self._memory_cache[agent_name] = (memory_data, mtime)
+                self._memory_cache[ck] = (memory_data, mtime)
             logger.info("Memory saved to %s", file_path)
             return True
         except OSError as e:

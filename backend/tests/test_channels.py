@@ -662,6 +662,44 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_memory_command_sends_im_partition_header(self):
+        from unittest.mock import AsyncMock, patch
+
+        from app.channels.message_bus import InboundMessage, InboundMessageType
+        from app.gateway.routers.memory import PARTITION_HEADER
+        from deerflow.config.im_partition import sanitize_im_user_id
+
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                partition_im_users_default=True,
+                channel_partition={"test": True},
+            )
+            await manager.start()
+            with patch.object(manager, "_fetch_gateway", new_callable=AsyncMock) as mock_fetch:
+                mock_fetch.return_value = "Memory contains 0 fact(s)."
+                await manager._handle_command(
+                    InboundMessage(
+                        channel_name="test",
+                        chat_id="c1",
+                        user_id="u-1",
+                        text="/memory",
+                        msg_type=InboundMessageType.COMMAND,
+                    )
+                )
+            mock_fetch.assert_awaited_once()
+            assert mock_fetch.call_args[0][0] == "/api/memory"
+            assert mock_fetch.call_args[1]["extra_headers"] == {PARTITION_HEADER: sanitize_im_user_id("u-1")}
+
+            await manager.stop()
+
+        _run(go())
+
     def test_handle_chat_rejects_invalid_custom_agent_name(self):
         from app.channels.manager import ChannelManager
 

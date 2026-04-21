@@ -788,6 +788,7 @@ checkpointer:
 #   #
 #   # Per-IM-user data under {DEER_FLOW_HOME}/im_users/<sha256>/ (memory, agent SOUL, threads).
 #   # partition_im_users: false
+#   # Gateway /api/memory accepts optional header X-DeerFlow-IM-Partition: <64-hex> (same as LangGraph im_partition_key).
 #
 #   # Optional: default mobile/session settings for all IM channels
 #   session:

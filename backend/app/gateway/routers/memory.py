@@ -1,6 +1,9 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from fastapi import APIRouter, HTTPException
+from collections.abc import AsyncGenerator
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.agents.memory.updater import (
@@ -14,7 +17,49 @@ from deerflow.agents.memory.updater import (
 )
 from deerflow.config.memory_config import get_memory_config
 
-router = APIRouter(prefix="/api", tags=["memory"])
+# Optional: scope memory file I/O under ``{DEER_FLOW_HOME}/im_users/<key>/`` (same key as LangGraph ``im_partition_key``).
+PARTITION_HEADER = "X-DeerFlow-IM-Partition"
+
+
+def _normalize_partition_header(raw: str) -> str:
+    """Validate ``X-DeerFlow-IM-Partition`` (SHA-256 hex from :func:`~deerflow.config.im_partition.sanitize_im_user_id`)."""
+    key = raw.strip().lower()
+    if len(key) != 64:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{PARTITION_HEADER} must be a 64-character hexadecimal SHA-256 digest.",
+        )
+    if any(c not in "0123456789abcdef" for c in key):
+        raise HTTPException(status_code=400, detail=f"{PARTITION_HEADER} must contain only hexadecimal characters.")
+    return key
+
+
+async def apply_im_partition_paths(
+    x_deer_flow_im_partition: Annotated[str | None, Header(alias=PARTITION_HEADER)] = None,
+) -> AsyncGenerator[None, None]:
+    """When set, resolve ``get_paths()`` to the IM user subtree for this request only."""
+    if not x_deer_flow_im_partition:
+        yield
+        return
+
+    key = _normalize_partition_header(x_deer_flow_im_partition)
+    from deerflow.config import path_context
+    from deerflow.config.im_partition import im_user_root
+    from deerflow.config.paths import Paths, get_paths_without_partition
+
+    part = Paths(base_dir=im_user_root(get_paths_without_partition().base_dir, key))
+    token = path_context.set_partition_paths(part)
+    try:
+        yield
+    finally:
+        path_context.reset_partition_paths(token)
+
+
+router = APIRouter(
+    prefix="/api",
+    tags=["memory"],
+    dependencies=[Depends(apply_im_partition_paths)],
+)
 
 
 class ContextSection(BaseModel):

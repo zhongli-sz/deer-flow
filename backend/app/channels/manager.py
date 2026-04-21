@@ -956,7 +956,11 @@ class ChannelManager:
         elif command == "models":
             reply = await self._fetch_gateway("/api/models", "models")
         elif command == "memory":
-            reply = await self._fetch_gateway("/api/memory", "memory")
+            reply = await self._fetch_gateway(
+                "/api/memory",
+                "memory",
+                extra_headers=self._im_partition_request_headers(msg),
+            )
         elif command == "help":
             reply = (
                 "Available commands:\n"
@@ -980,13 +984,25 @@ class ChannelManager:
         )
         await self.bus.publish_outbound(outbound)
 
-    async def _fetch_gateway(self, path: str, kind: str) -> str:
+    def _im_partition_request_headers(self, msg: InboundMessage) -> dict[str, str] | None:
+        """Headers so Gateway reads the same ``im_users/<key>/`` tree as IM agent runs."""
+        if not self._partition_enabled(msg):
+            return None
+        uid = str(msg.user_id or "").strip()
+        if not uid:
+            return None
+        from app.gateway.routers.memory import PARTITION_HEADER
+        from deerflow.config.im_partition import sanitize_im_user_id
+
+        return {PARTITION_HEADER: sanitize_im_user_id(uid)}
+
+    async def _fetch_gateway(self, path: str, kind: str, *, extra_headers: dict[str, str] | None = None) -> str:
         """Fetch data from the Gateway API for command responses."""
         import httpx
 
         try:
             async with httpx.AsyncClient() as http:
-                resp = await http.get(f"{self._gateway_url}{path}", timeout=10)
+                resp = await http.get(f"{self._gateway_url}{path}", timeout=10, headers=extra_headers)
                 resp.raise_for_status()
                 data = resp.json()
         except Exception:

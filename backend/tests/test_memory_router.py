@@ -1,9 +1,61 @@
+import json
 from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import memory
+
+from deerflow.config.im_partition import im_user_root, sanitize_im_user_id
+
+
+def test_im_partition_header_invalid_returns_400() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    with TestClient(app) as client:
+        response = client.get("/api/memory", headers={"X-DeerFlow-IM-Partition": "not-hex"})
+    assert response.status_code == 400
+
+
+def test_get_memory_with_partition_header_reads_user_memory_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    paths_module._paths = None
+
+    memory_sample = _sample_memory(
+        facts=[
+            {
+                "id": "fact_p",
+                "content": "partitioned fact",
+                "category": "context",
+                "confidence": 0.8,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "t1",
+            }
+        ]
+    )
+    key = sanitize_im_user_id("corp-user-xyz")
+    mem_dir = im_user_root(tmp_path, key)
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "memory.json").write_text(json.dumps(memory_sample), encoding="utf-8")
+
+    app = FastAPI()
+    app.include_router(memory.router)
+
+    from deerflow.agents.memory import storage as storage_mod
+
+    storage_mod._storage_instance = None
+
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/memory", headers={"X-DeerFlow-IM-Partition": key})
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["facts"]) == 1
+        assert body["facts"][0]["content"] == "partitioned fact"
+    finally:
+        storage_mod._storage_instance = None
 
 
 def _sample_memory(facts: list[dict] | None = None) -> dict:
