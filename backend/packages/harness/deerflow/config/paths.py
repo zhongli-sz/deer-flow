@@ -288,6 +288,11 @@ _paths: Paths | None = None
 
 def get_paths() -> Paths:
     """Return the global Paths singleton (lazy-initialized)."""
+    from . import path_context
+
+    override = path_context.partition_paths_ctx.get()
+    if override is not None:
+        return override
     global _paths
     if _paths is None:
         _paths = Paths()

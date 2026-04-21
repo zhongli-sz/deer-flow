@@ -1,3 +1,4 @@
+from . import path_context
 from .app_config import get_app_config
 from .extensions_config import ExtensionsConfig, get_extensions_config
 from .memory_config import MemoryConfig, get_memory_config
@@ -13,6 +14,7 @@ from .tracing_config import (
 )
 
 __all__ = [
+    "path_context",
     "get_app_config",
     "SkillEvolutionConfig",
     "Paths",
