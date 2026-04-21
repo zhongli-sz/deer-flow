@@ -7,6 +7,7 @@ from pathlib import Path, PureWindowsPath
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+_SAFE_TENANT_ID_RE = _SAFE_THREAD_ID_RE
 
 
 def _default_local_base_dir() -> Path:
@@ -20,6 +21,13 @@ def _validate_thread_id(thread_id: str) -> str:
     if not _SAFE_THREAD_ID_RE.match(thread_id):
         raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
     return thread_id
+
+
+def _validate_tenant_id(tenant_id: str) -> str:
+    """Validate a tenant ID before using it in filesystem paths."""
+    if not _SAFE_TENANT_ID_RE.match(tenant_id):
+        raise ValueError(f"Invalid tenant_id {tenant_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
+    return tenant_id
 
 
 def _join_host_path(base: str, *parts: str) -> str:
@@ -63,12 +71,7 @@ class Paths:
         │       ├── config.yaml
         │       ├── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
         │       └── memory.json
-        └── threads/
-            └── {thread_id}/
-                └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
-                    ├── workspace/     <-- /mnt/user-data/workspace/
-                    ├── uploads/       <-- /mnt/user-data/uploads/
-                    └── outputs/       <-- /mnt/user-data/outputs/
+        └── threads/{thread_id}/... or tenants/{tenant_id}/threads/{thread_id}/...
 
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
@@ -134,9 +137,13 @@ class Paths:
         """Per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
         return self.agent_dir(name) / "memory.json"
 
-    def thread_dir(self, thread_id: str) -> Path:
+    def thread_dir(self, thread_id: str, *, tenant_id: str | None = None) -> Path:
         """
-        Host path for a thread's data: `{base_dir}/threads/{thread_id}/`
+        Host path for a thread's data.
+
+        Layout:
+            - Default: `{base_dir}/threads/{thread_id}/`
+            - Tenant-scoped: `{base_dir}/tenants/{tenant_id}/threads/{thread_id}/`
 
         This directory contains a `user-data/` subdirectory that is mounted
         as `/mnt/user-data/` inside the sandbox.
@@ -145,33 +152,36 @@ class Paths:
             ValueError: If `thread_id` contains unsafe characters (path separators
                         or `..`) that could cause directory traversal.
         """
-        return self.base_dir / "threads" / _validate_thread_id(thread_id)
+        safe_thread_id = _validate_thread_id(thread_id)
+        if tenant_id is None:
+            return self.base_dir / "threads" / safe_thread_id
+        return self.base_dir / "tenants" / _validate_tenant_id(tenant_id) / "threads" / safe_thread_id
 
-    def sandbox_work_dir(self, thread_id: str) -> Path:
+    def sandbox_work_dir(self, thread_id: str, *, tenant_id: str | None = None) -> Path:
         """
         Host path for the agent's workspace directory.
         Host: `{base_dir}/threads/{thread_id}/user-data/workspace/`
         Sandbox: `/mnt/user-data/workspace/`
         """
-        return self.thread_dir(thread_id) / "user-data" / "workspace"
+        return self.thread_dir(thread_id, tenant_id=tenant_id) / "user-data" / "workspace"
 
-    def sandbox_uploads_dir(self, thread_id: str) -> Path:
+    def sandbox_uploads_dir(self, thread_id: str, *, tenant_id: str | None = None) -> Path:
         """
         Host path for user-uploaded files.
         Host: `{base_dir}/threads/{thread_id}/user-data/uploads/`
         Sandbox: `/mnt/user-data/uploads/`
         """
-        return self.thread_dir(thread_id) / "user-data" / "uploads"
+        return self.thread_dir(thread_id, tenant_id=tenant_id) / "user-data" / "uploads"
 
-    def sandbox_outputs_dir(self, thread_id: str) -> Path:
+    def sandbox_outputs_dir(self, thread_id: str, *, tenant_id: str | None = None) -> Path:
         """
         Host path for agent-generated artifacts.
         Host: `{base_dir}/threads/{thread_id}/user-data/outputs/`
         Sandbox: `/mnt/user-data/outputs/`
         """
-        return self.thread_dir(thread_id) / "user-data" / "outputs"
+        return self.thread_dir(thread_id, tenant_id=tenant_id) / "user-data" / "outputs"
 
-    def acp_workspace_dir(self, thread_id: str) -> Path:
+    def acp_workspace_dir(self, thread_id: str, *, tenant_id: str | None = None) -> Path:
         """
         Host path for the ACP workspace of a specific thread.
         Host: `{base_dir}/threads/{thread_id}/acp-workspace/`
@@ -180,41 +190,44 @@ class Paths:
         Each thread gets its own isolated ACP workspace so that concurrent
         sessions cannot read each other's ACP agent outputs.
         """
-        return self.thread_dir(thread_id) / "acp-workspace"
+        return self.thread_dir(thread_id, tenant_id=tenant_id) / "acp-workspace"
 
-    def sandbox_user_data_dir(self, thread_id: str) -> Path:
+    def sandbox_user_data_dir(self, thread_id: str, *, tenant_id: str | None = None) -> Path:
         """
         Host path for the user-data root.
         Host: `{base_dir}/threads/{thread_id}/user-data/`
         Sandbox: `/mnt/user-data/`
         """
-        return self.thread_dir(thread_id) / "user-data"
+        return self.thread_dir(thread_id, tenant_id=tenant_id) / "user-data"
 
-    def host_thread_dir(self, thread_id: str) -> str:
+    def host_thread_dir(self, thread_id: str, *, tenant_id: str | None = None) -> str:
         """Host path for a thread directory, preserving Windows path syntax."""
-        return _join_host_path(self._host_base_dir_str(), "threads", _validate_thread_id(thread_id))
+        safe_thread_id = _validate_thread_id(thread_id)
+        if tenant_id is None:
+            return _join_host_path(self._host_base_dir_str(), "threads", safe_thread_id)
+        return _join_host_path(self._host_base_dir_str(), "tenants", _validate_tenant_id(tenant_id), "threads", safe_thread_id)
 
-    def host_sandbox_user_data_dir(self, thread_id: str) -> str:
+    def host_sandbox_user_data_dir(self, thread_id: str, *, tenant_id: str | None = None) -> str:
         """Host path for a thread's user-data root."""
-        return _join_host_path(self.host_thread_dir(thread_id), "user-data")
+        return _join_host_path(self.host_thread_dir(thread_id, tenant_id=tenant_id), "user-data")
 
-    def host_sandbox_work_dir(self, thread_id: str) -> str:
+    def host_sandbox_work_dir(self, thread_id: str, *, tenant_id: str | None = None) -> str:
         """Host path for the workspace mount source."""
-        return _join_host_path(self.host_sandbox_user_data_dir(thread_id), "workspace")
+        return _join_host_path(self.host_sandbox_user_data_dir(thread_id, tenant_id=tenant_id), "workspace")
 
-    def host_sandbox_uploads_dir(self, thread_id: str) -> str:
+    def host_sandbox_uploads_dir(self, thread_id: str, *, tenant_id: str | None = None) -> str:
         """Host path for the uploads mount source."""
-        return _join_host_path(self.host_sandbox_user_data_dir(thread_id), "uploads")
+        return _join_host_path(self.host_sandbox_user_data_dir(thread_id, tenant_id=tenant_id), "uploads")
 
-    def host_sandbox_outputs_dir(self, thread_id: str) -> str:
+    def host_sandbox_outputs_dir(self, thread_id: str, *, tenant_id: str | None = None) -> str:
         """Host path for the outputs mount source."""
-        return _join_host_path(self.host_sandbox_user_data_dir(thread_id), "outputs")
+        return _join_host_path(self.host_sandbox_user_data_dir(thread_id, tenant_id=tenant_id), "outputs")
 
-    def host_acp_workspace_dir(self, thread_id: str) -> str:
+    def host_acp_workspace_dir(self, thread_id: str, *, tenant_id: str | None = None) -> str:
         """Host path for the ACP workspace mount source."""
-        return _join_host_path(self.host_thread_dir(thread_id), "acp-workspace")
+        return _join_host_path(self.host_thread_dir(thread_id, tenant_id=tenant_id), "acp-workspace")
 
-    def ensure_thread_dirs(self, thread_id: str) -> None:
+    def ensure_thread_dirs(self, thread_id: str, *, tenant_id: str | None = None) -> None:
         """Create all standard sandbox directories for a thread.
 
         Directories are created with mode 0o777 so that sandbox containers
@@ -228,24 +241,24 @@ class Paths:
         ACP agent invocation.
         """
         for d in [
-            self.sandbox_work_dir(thread_id),
-            self.sandbox_uploads_dir(thread_id),
-            self.sandbox_outputs_dir(thread_id),
-            self.acp_workspace_dir(thread_id),
+            self.sandbox_work_dir(thread_id, tenant_id=tenant_id),
+            self.sandbox_uploads_dir(thread_id, tenant_id=tenant_id),
+            self.sandbox_outputs_dir(thread_id, tenant_id=tenant_id),
+            self.acp_workspace_dir(thread_id, tenant_id=tenant_id),
         ]:
             d.mkdir(parents=True, exist_ok=True)
             d.chmod(0o777)
 
-    def delete_thread_dir(self, thread_id: str) -> None:
+    def delete_thread_dir(self, thread_id: str, *, tenant_id: str | None = None) -> None:
         """Delete all persisted data for a thread.
 
         The operation is idempotent: missing thread directories are ignored.
         """
-        thread_dir = self.thread_dir(thread_id)
+        thread_dir = self.thread_dir(thread_id, tenant_id=tenant_id)
         if thread_dir.exists():
             shutil.rmtree(thread_dir)
 
-    def resolve_virtual_path(self, thread_id: str, virtual_path: str) -> Path:
+    def resolve_virtual_path(self, thread_id: str, virtual_path: str, *, tenant_id: str | None = None) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.
 
         Args:
@@ -270,7 +283,7 @@ class Paths:
             raise ValueError(f"Path must start with /{prefix}")
 
         relative = stripped[len(prefix) :].lstrip("/")
-        base = self.sandbox_user_data_dir(thread_id).resolve()
+        base = self.sandbox_user_data_dir(thread_id, tenant_id=tenant_id).resolve()
         actual = (base / relative).resolve()
 
         try:
