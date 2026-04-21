@@ -8,7 +8,6 @@ from starlette.responses import Response
 from starlette.types import ASGIApp
 
 from app.gateway.tenancy.context import TenantContext, reset_tenant_context, set_tenant_context
-from app.gateway.tenancy.control_plane import ControlPlaneStore
 from app.gateway.tenancy.oidc import JwksCache, validate_access_token
 from app.gateway.tenancy.settings import TenancySettings
 
@@ -21,12 +20,10 @@ class MultiTenantAuthMiddleware(BaseHTTPMiddleware):
         app: ASGIApp,
         *,
         settings: TenancySettings,
-        control_plane: ControlPlaneStore,
         jwks_cache: JwksCache | None = None,
     ) -> None:
         super().__init__(app)
         self._settings = settings
-        self._control_plane = control_plane
         self._jwks_cache = jwks_cache
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
@@ -45,6 +42,10 @@ class MultiTenantAuthMiddleware(BaseHTTPMiddleware):
         if not settings.oidc_issuer or not settings.oidc_audience or not settings.jwks_url:
             return Response(status_code=500, content=b"tenancy misconfigured")
 
+        control_plane = getattr(request.app.state, "tenancy_control_plane", None)
+        if control_plane is None:
+            return Response(status_code=500, content=b"tenancy control plane not initialized")
+
         claims = await validate_access_token(
             token,
             issuer=settings.oidc_issuer,
@@ -58,7 +59,7 @@ class MultiTenantAuthMiddleware(BaseHTTPMiddleware):
             return Response(status_code=403, content=b"missing tenant claim")
 
         user_sub = str(claims["sub"])
-        if not self._control_plane.is_member(user_sub=user_sub, tenant_id=tenant_id):
+        if not control_plane.is_member(user_sub=user_sub, tenant_id=tenant_id):
             return Response(status_code=403, content=b"not a tenant member")
 
         token_ctx = set_tenant_context(TenantContext(tenant_id=tenant_id, user_sub=user_sub))

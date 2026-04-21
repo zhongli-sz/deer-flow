@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from app.gateway.path_utils import resolve_thread_virtual_path
+from app.gateway.tenancy.guards import paths_tenant_id_for_thread
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,8 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
         - Active web content such as `.html`, `.xhtml`, and `.svg` artifacts is always downloaded
     """
+    paths_tid = paths_tenant_id_for_thread(request, thread_id)
+
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:
         # Split the path at ".skill/" to get the ZIP file path and internal path
@@ -122,7 +125,7 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         skill_file_path = path[: marker_pos + len(".skill")]  # e.g., "mnt/user-data/outputs/my-skill.skill"
         internal_path = path[marker_pos + len(skill_marker) :]  # e.g., "SKILL.md"
 
-        actual_skill_path = resolve_thread_virtual_path(thread_id, skill_file_path)
+        actual_skill_path = resolve_thread_virtual_path(thread_id, skill_file_path, tenant_id=paths_tid)
 
         if not actual_skill_path.exists():
             raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
@@ -152,7 +155,7 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         except UnicodeDecodeError:
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
 
-    actual_path = resolve_thread_virtual_path(thread_id, path)
+    actual_path = resolve_thread_virtual_path(thread_id, path, tenant_id=paths_tid)
 
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
 

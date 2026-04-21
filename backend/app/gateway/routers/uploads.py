@@ -4,9 +4,10 @@ import logging
 import os
 import stat
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
+from app.gateway.tenancy.guards import paths_tenant_id_for_thread
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
@@ -85,17 +86,20 @@ def _auto_convert_documents_enabled() -> bool:
 @router.post("", response_model=UploadResponse)
 async def upload_files(
     thread_id: str,
+    request: Request,
     files: list[UploadFile] = File(...),
 ) -> UploadResponse:
     """Upload multiple files to a thread's uploads directory."""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
+    paths_tid = paths_tenant_id_for_thread(request, thread_id)
+
     try:
-        uploads_dir = ensure_uploads_dir(thread_id)
+        uploads_dir = ensure_uploads_dir(thread_id, tenant_id=paths_tid)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id)
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, tenant_id=paths_tid)
     uploaded_files = []
 
     sandbox_provider = get_sandbox_provider()
@@ -166,17 +170,19 @@ async def upload_files(
 
 
 @router.get("/list", response_model=dict)
-async def list_uploaded_files(thread_id: str) -> dict:
+async def list_uploaded_files(thread_id: str, request: Request) -> dict:
     """List all files in a thread's uploads directory."""
+    paths_tid = paths_tenant_id_for_thread(request, thread_id)
+
     try:
-        uploads_dir = get_uploads_dir(thread_id)
+        uploads_dir = get_uploads_dir(thread_id, tenant_id=paths_tid)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     result = list_files_in_dir(uploads_dir)
     enrich_file_listing(result, thread_id)
 
     # Gateway additionally includes the sandbox-relative path.
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id)
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, tenant_id=paths_tid)
     for f in result["files"]:
         f["path"] = str(sandbox_uploads / f["filename"])
 
@@ -184,10 +190,12 @@ async def list_uploaded_files(thread_id: str) -> dict:
 
 
 @router.delete("/{filename}")
-async def delete_uploaded_file(thread_id: str, filename: str) -> dict:
+async def delete_uploaded_file(thread_id: str, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
+    paths_tid = paths_tenant_id_for_thread(request, thread_id)
+
     try:
-        uploads_dir = get_uploads_dir(thread_id)
+        uploads_dir = get_uploads_dir(thread_id, tenant_id=paths_tid)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:

@@ -1,6 +1,6 @@
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 
@@ -37,41 +37,59 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
 
-    # Load config and check necessary environment variables at startup
-    try:
-        get_app_config()
-        logger.info("Configuration loaded successfully")
-    except Exception as e:
-        error_msg = f"Failed to load configuration during gateway startup: {e}"
-        logger.exception(error_msg)
-        raise RuntimeError(error_msg) from e
-    config = get_gateway_config()
-    logger.info(f"Starting API Gateway on {config.host}:{config.port}")
+    with ExitStack() as tenancy_stack:
+        app.state.tenancy_control_plane = None
 
-    # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
-    async with langgraph_runtime(app):
-        logger.info("LangGraph runtime initialised")
-
-        # Start IM channel service if any channels are configured
+        # Load config and check necessary environment variables at startup
         try:
-            from app.channels.service import start_channel_service
+            get_app_config()
+            logger.info("Configuration loaded successfully")
+        except Exception as e:
+            error_msg = f"Failed to load configuration during gateway startup: {e}"
+            logger.exception(error_msg)
+            raise RuntimeError(error_msg) from e
 
-            channel_service = await start_channel_service()
-            logger.info("Channel service started: %s", channel_service.get_status())
-        except Exception:
-            logger.exception("No IM channels configured or channel service failed to start")
+        from pathlib import Path
 
-        yield
+        from app.gateway.tenancy.control_plane import open_control_plane
+        from app.gateway.tenancy.settings import TenancySettings
+        from deerflow.config.paths import get_paths
 
-        # Stop channel service on shutdown
-        try:
-            from app.channels.service import stop_channel_service
+        tenancy_settings = TenancySettings.from_env()
+        if tenancy_settings.enabled:
+            raw = Path(tenancy_settings.sqlite_path).expanduser()
+            db_path = raw if raw.is_absolute() else get_paths().base_dir / raw
+            app.state.tenancy_control_plane = tenancy_stack.enter_context(open_control_plane(db_path))
+            app.state.tenancy_control_plane.ensure_schema()
 
-            await stop_channel_service()
-        except Exception:
-            logger.exception("Failed to stop channel service")
+        config = get_gateway_config()
+        logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
-    logger.info("Shutting down API Gateway")
+        # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
+        async with langgraph_runtime(app):
+            logger.info("LangGraph runtime initialised")
+
+            # Start IM channel service if any channels are configured
+            try:
+                from app.channels.service import start_channel_service
+
+                channel_service = await start_channel_service()
+                logger.info("Channel service started: %s", channel_service.get_status())
+            except Exception:
+                logger.exception("No IM channels configured or channel service failed to start")
+
+            yield
+
+            # Stop channel service on shutdown
+            try:
+                from app.channels.service import stop_channel_service
+
+                await stop_channel_service()
+            except Exception:
+                logger.exception("Failed to stop channel service")
+
+        app.state.tenancy_control_plane = None
+        logger.info("Shutting down API Gateway")
 
 
 def create_app() -> FastAPI:
@@ -213,6 +231,13 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
             Service health status information.
         """
         return {"status": "healthy", "service": "deer-flow-gateway"}
+
+    from app.gateway.tenancy.middleware import MultiTenantAuthMiddleware
+    from app.gateway.tenancy.settings import TenancySettings
+
+    _tenancy = TenancySettings.from_env()
+    if _tenancy.enabled:
+        app.add_middleware(MultiTenantAuthMiddleware, settings=_tenancy)
 
     return app
 

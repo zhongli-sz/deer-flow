@@ -21,6 +21,9 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_checkpointer, get_store
+from app.gateway.tenancy.context import get_tenant_context_optional
+from app.gateway.tenancy.guards import paths_tenant_id_for_thread
+from app.gateway.tenancy.settings import TenancySettings
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
 
@@ -126,11 +129,11 @@ class ThreadHistoryRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _delete_thread_data(thread_id: str, paths: Paths | None = None) -> ThreadDeleteResponse:
+def _delete_thread_data(thread_id: str, paths: Paths | None = None, *, tenant_id: str | None = None) -> ThreadDeleteResponse:
     """Delete local persisted filesystem data for a thread."""
     path_manager = paths or get_paths()
     try:
-        path_manager.delete_thread_dir(thread_id)
+        path_manager.delete_thread_dir(thread_id, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except FileNotFoundError:
@@ -221,8 +224,16 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     Cleans DeerFlow-managed thread directories, removes checkpoint data,
     and removes the thread record from the Store.
     """
+    paths_tid = paths_tenant_id_for_thread(request, thread_id)
     # Clean local filesystem
-    response = _delete_thread_data(thread_id)
+    response = _delete_thread_data(thread_id, tenant_id=paths_tid)
+
+    cp = getattr(request.app.state, "tenancy_control_plane", None)
+    if TenancySettings.from_env().enabled and cp is not None:
+        try:
+            cp.delete_thread_mapping(thread_id)
+        except Exception:
+            logger.debug("Could not delete gateway thread mapping for %s (not critical)", thread_id)
 
     # Remove from Store (best-effort)
     store = get_store(request)
@@ -256,11 +267,22 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     checkpointer = get_checkpointer(request)
     thread_id = body.thread_id or str(uuid.uuid4())
     now = time.time()
+    if TenancySettings.from_env().enabled and get_tenant_context_optional() is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    ctx = get_tenant_context_optional()
+    tenancy_on = TenancySettings.from_env().enabled and ctx is not None
+    cp = getattr(request.app.state, "tenancy_control_plane", None) if tenancy_on else None
 
     # Idempotency: return existing record from Store when already present
     if store is not None:
         existing_record = await _store_get(store, thread_id)
         if existing_record is not None:
+            if tenancy_on:
+                if cp is None:
+                    raise HTTPException(status_code=503, detail="Tenancy store unavailable")
+                owner = cp.get_thread_tenant(thread_id)
+                if owner is None or owner != ctx.tenant_id:
+                    raise HTTPException(status_code=404, detail="Thread not found")
             return ThreadResponse(
                 thread_id=thread_id,
                 status=existing_record.get("status", "idle"),
@@ -303,6 +325,12 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     except Exception:
         logger.exception("Failed to create checkpoint for thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to create thread")
+
+    if tenancy_on and cp is not None:
+        try:
+            cp.register_thread(tenant_id=ctx.tenant_id, thread_id=thread_id, user_sub=ctx.user_sub)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     logger.info("Thread created: %s", thread_id)
     return ThreadResponse(

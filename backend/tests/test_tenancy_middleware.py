@@ -22,10 +22,10 @@ def _make_rsa():
 
 def _make_app(*, settings: TenancySettings, control_plane, jwks_cache: JwksCache | None = None, include_sub: bool = False) -> FastAPI:
     app = FastAPI()
+    app.state.tenancy_control_plane = control_plane
     app.add_middleware(
         MultiTenantAuthMiddleware,
         settings=settings,
-        control_plane=control_plane,
         jwks_cache=jwks_cache,
     )
 

@@ -28,6 +28,11 @@ class ControlPlaneStore:
                 PRIMARY KEY (tenant_id, user_sub)
             );
             CREATE INDEX IF NOT EXISTS idx_members_user ON tenant_members(user_sub);
+            CREATE TABLE IF NOT EXISTS gateway_threads (
+                thread_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+                user_sub TEXT NOT NULL
+            );
             """
         )
         self._conn.commit()
@@ -57,6 +62,26 @@ class ControlPlaneStore:
             (user_sub, tenant_id),
         ).fetchone()
         return row is not None
+
+    def get_thread_tenant(self, thread_id: str) -> str | None:
+        row = self._conn.execute("SELECT tenant_id FROM gateway_threads WHERE thread_id = ?", (thread_id,)).fetchone()
+        return row[0] if row else None
+
+    def register_thread(self, *, tenant_id: str, thread_id: str, user_sub: str) -> None:
+        existing = self.get_thread_tenant(thread_id)
+        if existing is not None:
+            if existing != tenant_id:
+                raise ValueError(f"thread_id {thread_id!r} is already bound to another tenant")
+            return
+        self._conn.execute(
+            "INSERT INTO gateway_threads(thread_id, tenant_id, user_sub) VALUES (?, ?, ?)",
+            (thread_id, tenant_id, user_sub),
+        )
+        self._conn.commit()
+
+    def delete_thread_mapping(self, thread_id: str) -> None:
+        self._conn.execute("DELETE FROM gateway_threads WHERE thread_id = ?", (thread_id,))
+        self._conn.commit()
 
 
 @contextmanager

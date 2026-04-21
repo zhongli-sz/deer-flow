@@ -30,15 +30,15 @@ def validate_thread_id(thread_id: str) -> None:
         raise ValueError(f"Invalid thread_id: {thread_id!r}")
 
 
-def get_uploads_dir(thread_id: str) -> Path:
+def get_uploads_dir(thread_id: str, *, tenant_id: str | None = None) -> Path:
     """Return the uploads directory path for a thread (no side effects)."""
     validate_thread_id(thread_id)
-    return get_paths().sandbox_uploads_dir(thread_id)
+    return get_paths().sandbox_uploads_dir(thread_id, tenant_id=tenant_id)
 
 
-def ensure_uploads_dir(thread_id: str) -> Path:
+def ensure_uploads_dir(thread_id: str, *, tenant_id: str | None = None) -> Path:
     """Return the uploads directory for a thread, creating it if needed."""
-    base = get_uploads_dir(thread_id)
+    base = get_uploads_dir(thread_id, tenant_id=tenant_id)
     base.mkdir(parents=True, exist_ok=True)
     return base
 
