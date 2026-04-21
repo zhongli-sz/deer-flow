@@ -541,7 +541,9 @@ All APIs return errors in a consistent format:
 
 ## Authentication
 
-Currently, DeerFlow does not implement authentication. All APIs are accessible without credentials.
+### Default (single-tenant)
+
+DeerFlow does not require authentication on the Gateway unless multi-tenant mode is enabled. All APIs are accessible without credentials.
 
 Note: This is about DeerFlow API authentication. MCP outbound connections can still use OAuth for configured HTTP/SSE MCP servers.
 
@@ -549,6 +551,16 @@ For production deployments, it is recommended to:
 1. Use Nginx for basic auth or OAuth integration
 2. Deploy behind a VPN or private network
 3. Implement custom authentication middleware
+
+### Optional multi-tenant mode (Gateway)
+
+When `DEERFLOW_TENANCY_ENABLED=1`, the Gateway loads `MultiTenantAuthMiddleware` and a SQLite control-plane database (see `.env.example` for `DEERFLOW_TENANCY_*` variables).
+
+- Clients must send `Authorization: Bearer <JWT>` on non-exempt routes (health/docs/OpenAPI remain open).
+- The JWT is validated against the configured issuer, audience, and JWKS URL; a tenant claim (default `tenant_id`) must be present; membership is checked in the control-plane database.
+- Thread-scoped routes (`/api/threads/{thread_id}/…`) require a `gateway_threads` mapping created via `POST /api/threads`. Access to another tenant’s thread id returns **404** (not **403**) to avoid leaking existence.
+
+Checkpoint / LangGraph `thread_id` encoding for full isolation across tenants is documented in `docs/superpowers/spikes/2026-04-21-langgraph-tenant-namespace-notes.md` and may still be in progress depending on your checkout.
 
 ---
 

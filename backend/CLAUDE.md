@@ -158,7 +158,7 @@ from deerflow.config import get_app_config
 
 Lead-agent middlewares are assembled in strict append order across `packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py` (`build_lead_runtime_middlewares`) and `packages/harness/deerflow/agents/lead_agent/agent.py` (`_build_middlewares`):
 
-1. **ThreadDataMiddleware** - Creates per-thread directories (`backend/.deer-flow/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); Web UI thread deletion now follows LangGraph thread removal with Gateway cleanup of the local `.deer-flow/threads/{thread_id}` directory
+1. **ThreadDataMiddleware** - Creates per-thread directories under `backend/.deer-flow/threads/{thread_id}/user-data/...` by default, or `.../tenants/{tenant_id}/threads/{thread_id}/...` when `config.configurable["tenant_id"]` (or runtime `context["tenant_id"]`) is set for multi-tenant layouts; Web UI thread deletion follows LangGraph thread removal with Gateway cleanup of the matching directory tree
 2. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation
 3. **SandboxMiddleware** - Acquires sandbox, stores `sandbox_id` in state
 4. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., due to user interruption), including raw provider tool-call payloads preserved only in `additional_kwargs["tool_calls"]`
@@ -222,6 +222,8 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types |
 | **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized before JSON parsing |
+
+**Multi-tenant (optional):** Set `DEERFLOW_TENANCY_ENABLED=1` and related `DEERFLOW_TENANCY_*` env vars (see repo `.env.example`). Code lives under `app/gateway/tenancy/` (`TenancySettings`, `MultiTenantAuthMiddleware`, SQLite control plane with `gateway_threads` ownership, `paths_tenant_id_for_thread` guards on thread routes). Per-tenant filesystem paths use `Paths(..., tenant_id=...)` from `deerflow.config.paths`.
 
 Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
 
