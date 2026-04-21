@@ -43,8 +43,13 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
                       Default is True for optimal performance.
         """
         super().__init__()
-        self._paths = Paths(base_dir) if base_dir else get_paths()
+        # Fixed base only when tests/tools pass explicit base_dir; otherwise resolve per-run
+        # via get_paths() so PartitionPathsMiddleware can scope thread dirs under im_users/.
+        self._fixed_paths: Paths | None = Paths(base_dir) if base_dir is not None else None
         self._lazy_init = lazy_init
+
+    def _paths_for_run(self) -> Paths:
+        return self._fixed_paths if self._fixed_paths is not None else get_paths()
 
     def _get_thread_paths(self, thread_id: str) -> dict[str, str]:
         """Get the paths for a thread's data directories.
@@ -55,10 +60,11 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         Returns:
             Dictionary with workspace_path, uploads_path, and outputs_path.
         """
+        paths = self._paths_for_run()
         return {
-            "workspace_path": str(self._paths.sandbox_work_dir(thread_id)),
-            "uploads_path": str(self._paths.sandbox_uploads_dir(thread_id)),
-            "outputs_path": str(self._paths.sandbox_outputs_dir(thread_id)),
+            "workspace_path": str(paths.sandbox_work_dir(thread_id)),
+            "uploads_path": str(paths.sandbox_uploads_dir(thread_id)),
+            "outputs_path": str(paths.sandbox_outputs_dir(thread_id)),
         }
 
     def _create_thread_directories(self, thread_id: str) -> dict[str, str]:
@@ -70,7 +76,7 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         Returns:
             Dictionary with the created directory paths.
         """
-        self._paths.ensure_thread_dirs(thread_id)
+        self._paths_for_run().ensure_thread_dirs(thread_id)
         return self._get_thread_paths(thread_id)
 
     @override
