@@ -35,6 +35,10 @@ class RunRecord:
     abort_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     abort_action: str = "interrupt"
     error: str | None = None
+    checkpoint_thread_id: str | None = None
+    """LangGraph checkpointer ``thread_id``; when ``None``, use :attr:`thread_id`."""
+    run_tenant_id: str | None = None
+    """Gateway tenant that owns this run (``None`` when multi-tenant mode is off)."""
 
 
 class RunManager:
@@ -78,12 +82,23 @@ class RunManager:
         """Return a run record by ID, or ``None``."""
         return self._runs.get(run_id)
 
-    async def list_by_thread(self, thread_id: str) -> list[RunRecord]:
-        """Return all runs for a given thread, newest first."""
+    async def list_by_thread(self, thread_id: str, *, tenant_id: str | None = None) -> list[RunRecord]:
+        """Return all runs for a given thread, newest first.
+
+        When *tenant_id* is set (multi-tenant Gateway), only runs created under that
+        tenant are returned so distinct tenants may reuse the same public thread id.
+        """
         async with self._lock:
             # Dict insertion order matches creation order, so reversing it gives
             # us deterministic newest-first results even when timestamps tie.
-            return [r for r in reversed(self._runs.values()) if r.thread_id == thread_id]
+            out: list[RunRecord] = []
+            for r in reversed(self._runs.values()):
+                if r.thread_id != thread_id:
+                    continue
+                if tenant_id is not None and r.run_tenant_id != tenant_id:
+                    continue
+                out.append(r)
+            return out
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""
@@ -132,6 +147,8 @@ class RunManager:
         metadata: dict | None = None,
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
+        checkpoint_thread_id: str | None = None,
+        run_tenant_id: str | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -151,7 +168,12 @@ class RunManager:
             if multitask_strategy not in _supported_strategies:
                 raise UnsupportedStrategyError(f"Multitask strategy '{multitask_strategy}' is not yet supported. Supported strategies: {', '.join(_supported_strategies)}")
 
-            inflight = [r for r in self._runs.values() if r.thread_id == thread_id and r.status in (RunStatus.pending, RunStatus.running)]
+            inflight_key = checkpoint_thread_id or thread_id
+            inflight = [
+                r
+                for r in self._runs.values()
+                if (r.checkpoint_thread_id or r.thread_id) == inflight_key and r.status in (RunStatus.pending, RunStatus.running)
+            ]
 
             if multitask_strategy == "reject" and inflight:
                 raise ConflictError(f"Thread {thread_id} already has an active run")
@@ -182,6 +204,8 @@ class RunManager:
                 kwargs=kwargs or {},
                 created_at=now,
                 updated_at=now,
+                checkpoint_thread_id=checkpoint_thread_id,
+                run_tenant_id=run_tenant_id,
             )
             self._runs[run_id] = record
 

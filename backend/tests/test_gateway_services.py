@@ -87,6 +87,16 @@ def test_build_run_config_basic():
     config = build_run_config("thread-1", None, None)
     assert config["configurable"]["thread_id"] == "thread-1"
     assert config["recursion_limit"] == 100
+    assert "tenant_id" not in config["configurable"]
+
+
+def test_build_run_config_injects_tenant_id_for_multi_tenant():
+    from app.gateway.services import build_run_config
+
+    ck = "tenant:org-1:thread:abc"
+    config = build_run_config(ck, None, None, tenant_id="org-1")
+    assert config["configurable"]["thread_id"] == ck
+    assert config["configurable"]["tenant_id"] == "org-1"
 
 
 def test_build_run_config_with_overrides():

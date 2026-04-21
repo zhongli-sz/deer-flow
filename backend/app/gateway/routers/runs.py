@@ -74,7 +74,8 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
             pass
 
     checkpointer = get_checkpointer(request)
-    config = {"configurable": {"thread_id": thread_id}}
+    ck_thread = record.checkpoint_thread_id or record.thread_id
+    config = {"configurable": {"thread_id": ck_thread, "checkpoint_ns": ""}}
     try:
         checkpoint_tuple = await checkpointer.aget_tuple(config)
         if checkpoint_tuple is not None:

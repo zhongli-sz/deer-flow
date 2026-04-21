@@ -18,6 +18,9 @@ from fastapi import HTTPException, Request
 from langchain_core.messages import HumanMessage
 
 from app.gateway.deps import get_checkpointer, get_run_manager, get_store, get_stream_bridge
+from app.gateway.tenancy.context import get_tenant_context_optional
+from app.gateway.tenancy.settings import TenancySettings
+from app.gateway.tenancy.thread_ids import storage_thread_id
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -111,11 +114,12 @@ def resolve_agent_factory(assistant_id: str | None):
 
 
 def build_run_config(
-    thread_id: str,
+    checkpoint_thread_id: str,
     request_config: dict[str, Any] | None,
     metadata: dict[str, Any] | None,
     *,
     assistant_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> dict[str, Any]:
     """Build a RunnableConfig dict for the agent.
 
@@ -139,19 +143,22 @@ def build_run_config(
             if "configurable" in request_config:
                 logger.warning(
                     "build_run_config: client sent both 'context' and 'configurable'; preferring 'context' (LangGraph >= 0.6.0). thread_id=%s, caller_configurable keys=%s",
-                    thread_id,
+                    checkpoint_thread_id,
                     list(request_config.get("configurable", {}).keys()),
                 )
             config["context"] = request_config["context"]
         else:
-            configurable = {"thread_id": thread_id}
+            configurable = {"thread_id": checkpoint_thread_id}
             configurable.update(request_config.get("configurable", {}))
             config["configurable"] = configurable
         for k, v in request_config.items():
             if k not in ("configurable", "context"):
                 config[k] = v
     else:
-        config["configurable"] = {"thread_id": thread_id}
+        config["configurable"] = {"thread_id": checkpoint_thread_id}
+
+    if tenant_id and "configurable" in config and isinstance(config["configurable"], dict):
+        config["configurable"]["tenant_id"] = tenant_id
 
     # Inject custom agent name when the caller specified a non-default assistant.
     # Honour an explicit configurable["agent_name"] in the request if already set.
@@ -171,7 +178,31 @@ def build_run_config(
 # ---------------------------------------------------------------------------
 
 
-async def _upsert_thread_in_store(store, thread_id: str, metadata: dict | None) -> None:
+def resolve_checkpoint_storage_for_run(request: Request, public_thread_id: str) -> tuple[str | None, str]:
+    """Return ``(tenant_id, checkpoint_thread_id)`` for LangGraph and the run registry.
+
+    Registers the thread with the control plane on first use (stateless runs).
+    """
+    if not TenancySettings.from_env().enabled:
+        return None, public_thread_id
+    ctx = get_tenant_context_optional()
+    if ctx is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    cp = getattr(request.app.state, "tenancy_control_plane", None)
+    if cp is None:
+        raise HTTPException(status_code=503, detail="Tenancy store unavailable")
+    owner = cp.get_thread_tenant(public_thread_id)
+    if owner is not None and owner != ctx.tenant_id:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if owner is None:
+        try:
+            cp.register_thread(tenant_id=ctx.tenant_id, thread_id=public_thread_id, user_sub=ctx.user_sub)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ctx.tenant_id, storage_thread_id(public_thread_id=public_thread_id, tenant_id=ctx.tenant_id)
+
+
+async def _upsert_thread_in_store(store, public_thread_id: str, metadata: dict | None, *, storage_key: str | None = None) -> None:
     """Create or refresh the thread record in the Store.
 
     Called from :func:`start_run` so that threads created via the stateless
@@ -182,16 +213,18 @@ async def _upsert_thread_in_store(store, thread_id: str, metadata: dict | None) 
     from app.gateway.routers.threads import _store_upsert
 
     try:
-        await _store_upsert(store, thread_id, metadata=metadata)
+        await _store_upsert(store, public_thread_id, storage_key=storage_key, metadata=metadata)
     except Exception:
-        logger.warning("Failed to upsert thread %s in store (non-fatal)", thread_id)
+        logger.warning("Failed to upsert thread %s in store (non-fatal)", public_thread_id)
 
 
 async def _sync_thread_title_after_run(
     run_task: asyncio.Task,
-    thread_id: str,
+    public_thread_id: str,
     checkpointer: Any,
     store: Any,
+    *,
+    storage_key: str,
 ) -> None:
     """Wait for *run_task* to finish, then persist the generated title to the Store.
 
@@ -213,7 +246,7 @@ async def _sync_thread_title_after_run(
     from app.gateway.routers.threads import _store_get, _store_put
 
     try:
-        ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        ckpt_config = {"configurable": {"thread_id": storage_key, "checkpoint_ns": ""}}
         ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
         if ckpt_tuple is None:
             return
@@ -223,17 +256,17 @@ async def _sync_thread_title_after_run(
         if not title:
             return
 
-        existing = await _store_get(store, thread_id)
+        existing = await _store_get(store, public_thread_id, storage_key=storage_key)
         if existing is None:
             return
 
         updated = dict(existing)
         updated.setdefault("values", {})["title"] = title
         updated["updated_at"] = time.time()
-        await _store_put(store, updated)
-        logger.debug("Synced title %r for thread %s", title, thread_id)
+        await _store_put(store, updated, storage_key=storage_key)
+        logger.debug("Synced title %r for thread %s", title, public_thread_id)
     except Exception:
-        logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id, exc_info=True)
+        logger.debug("Failed to sync title for thread %s (non-fatal)", public_thread_id, exc_info=True)
 
 
 async def start_run(
@@ -258,6 +291,8 @@ async def start_run(
     checkpointer = get_checkpointer(request)
     store = get_store(request)
 
+    tenant_id, checkpoint_key = resolve_checkpoint_storage_for_run(request, thread_id)
+
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
     try:
@@ -268,6 +303,8 @@ async def start_run(
             metadata=body.metadata or {},
             kwargs={"input": body.input, "config": body.config},
             multitask_strategy=body.multitask_strategy,
+            checkpoint_thread_id=checkpoint_key,
+            run_tenant_id=tenant_id,
         )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -276,13 +313,12 @@ async def start_run(
 
     # Ensure the thread is visible in /threads/search, even for threads that
     # were never explicitly created via POST /threads (e.g. stateless runs).
-    store = get_store(request)
     if store is not None:
-        await _upsert_thread_in_store(store, thread_id, body.metadata)
+        await _upsert_thread_in_store(store, thread_id, body.metadata, storage_key=checkpoint_key)
 
     agent_factory = resolve_agent_factory(body.assistant_id)
     graph_input = normalize_input(body.input)
-    config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+    config = build_run_config(checkpoint_key, body.config, body.metadata, assistant_id=body.assistant_id, tenant_id=tenant_id)
 
     # Merge DeerFlow-specific context overrides into configurable.
     # The ``context`` field is a custom extension for the langgraph-compat layer
@@ -330,7 +366,7 @@ async def start_run(
     # the checkpointer into the Store record so that /threads/search returns the
     # correct title instead of an empty values dict.
     if store is not None:
-        asyncio.create_task(_sync_thread_title_after_run(task, thread_id, checkpointer, store))
+        asyncio.create_task(_sync_thread_title_after_run(task, thread_id, checkpointer, store, storage_key=checkpoint_key))
 
     return record
 

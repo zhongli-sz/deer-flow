@@ -21,6 +21,9 @@ from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_checkpointer, get_run_manager, get_stream_bridge
 from app.gateway.services import sse_consumer, start_run
+from app.gateway.tenancy.context import get_tenant_context_optional
+from app.gateway.tenancy.guards import paths_tenant_id_for_thread
+from app.gateway.tenancy.settings import TenancySettings
 from deerflow.runtime import RunRecord, serialize_channel_values
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,17 @@ class RunResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _assert_run_in_thread(request: Request, thread_id: str, record: RunRecord) -> None:
+    if record.thread_id != thread_id:
+        raise HTTPException(status_code=404, detail=f"Run {record.run_id} not found")
+    if TenancySettings.from_env().enabled:
+        ctx = get_tenant_context_optional()
+        if ctx is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if record.run_tenant_id is not None and record.run_tenant_id != ctx.tenant_id:
+            raise HTTPException(status_code=404, detail=f"Run {record.run_id} not found")
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
@@ -137,7 +151,8 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
             pass
 
     checkpointer = get_checkpointer(request)
-    config = {"configurable": {"thread_id": thread_id}}
+    ck_thread = record.checkpoint_thread_id or record.thread_id
+    config = {"configurable": {"thread_id": ck_thread, "checkpoint_ns": ""}}
     try:
         checkpoint_tuple = await checkpointer.aget_tuple(config)
         if checkpoint_tuple is not None:
@@ -154,7 +169,8 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
 async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
     """List all runs for a thread."""
     run_mgr = get_run_manager(request)
-    records = await run_mgr.list_by_thread(thread_id)
+    tenant_id = paths_tenant_id_for_thread(request, thread_id) if TenancySettings.from_env().enabled else None
+    records = await run_mgr.list_by_thread(thread_id, tenant_id=tenant_id)
     return [_record_to_response(r) for r in records]
 
 
@@ -163,8 +179,9 @@ async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
     run_mgr = get_run_manager(request)
     record = run_mgr.get(run_id)
-    if record is None or record.thread_id != thread_id:
+    if record is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    _assert_run_in_thread(request, thread_id, record)
     return _record_to_response(record)
 
 
@@ -185,8 +202,9 @@ async def cancel_run(
     """
     run_mgr = get_run_manager(request)
     record = run_mgr.get(run_id)
-    if record is None or record.thread_id != thread_id:
+    if record is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    _assert_run_in_thread(request, thread_id, record)
 
     cancelled = await run_mgr.cancel(run_id, action=action)
     if not cancelled:
@@ -211,8 +229,9 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     record = run_mgr.get(run_id)
-    if record is None or record.thread_id != thread_id:
+    if record is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    _assert_run_in_thread(request, thread_id, record)
 
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
@@ -242,8 +261,9 @@ async def stream_existing_run(
     """
     run_mgr = get_run_manager(request)
     record = run_mgr.get(run_id)
-    if record is None or record.thread_id != thread_id:
+    if record is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    _assert_run_in_thread(request, thread_id, record)
 
     # Cancel if an action was requested (stop-button / interrupt flow)
     if action is not None:

@@ -52,6 +52,7 @@ async def run_agent(
 
     run_id = record.run_id
     thread_id = record.thread_id
+    checkpoint_thread_id = record.checkpoint_thread_id or record.thread_id
     requested_modes: set[str] = set(stream_modes or ["values"])
     pre_run_checkpoint_id: str | None = None
     pre_run_snapshot: dict[str, Any] | None = None
@@ -71,7 +72,7 @@ async def run_agent(
         # Snapshot the latest pre-run checkpoint so rollback can restore it.
         if checkpointer is not None:
             try:
-                config_for_check = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+                config_for_check = {"configurable": {"thread_id": checkpoint_thread_id, "checkpoint_ns": ""}}
                 ckpt_tuple = await checkpointer.aget_tuple(config_for_check)
                 if ckpt_tuple is not None:
                     ckpt_config = getattr(ckpt_tuple, "config", {}).get("configurable", {})
@@ -102,7 +103,11 @@ async def run_agent(
 
         # Inject runtime context so middlewares can access thread_id
         # (langgraph-cli does this automatically; we must do it manually)
-        runtime = Runtime(context={"thread_id": thread_id}, store=store)
+        runtime_ctx: dict[str, Any] = {"thread_id": thread_id}
+        cfg_tid = config.get("configurable", {}).get("tenant_id") if isinstance(config.get("configurable"), dict) else None
+        if cfg_tid:
+            runtime_ctx["tenant_id"] = cfg_tid
+        runtime = Runtime(context=runtime_ctx, store=store)
         # If the caller already set a ``context`` key (LangGraph >= 0.6.0
         # prefers it over ``configurable`` for thread-level data), make
         # sure ``thread_id`` is available there too.
@@ -188,7 +193,7 @@ async def run_agent(
                 try:
                     await _rollback_to_pre_run_checkpoint(
                         checkpointer=checkpointer,
-                        thread_id=thread_id,
+                        thread_id=checkpoint_thread_id,
                         run_id=run_id,
                         pre_run_checkpoint_id=pre_run_checkpoint_id,
                         pre_run_snapshot=pre_run_snapshot,
@@ -209,7 +214,7 @@ async def run_agent(
             try:
                 await _rollback_to_pre_run_checkpoint(
                     checkpointer=checkpointer,
-                    thread_id=thread_id,
+                    thread_id=checkpoint_thread_id,
                     run_id=run_id,
                     pre_run_checkpoint_id=pre_run_checkpoint_id,
                     pre_run_snapshot=pre_run_snapshot,
