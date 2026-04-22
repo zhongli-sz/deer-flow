@@ -118,6 +118,23 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _langgraph_sdk_run_config(run_config: dict[str, Any], run_context: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``config`` object for ``langgraph_sdk`` ``runs.wait`` / ``runs.stream``.
+
+    LangGraph Platform >= 0.6 rejects requests that include both ``config.configurable``
+    and a separate ``context`` argument. ChannelManager historically split DeerFlow
+    defaults (``run_context``) from per-thread keys (``configurable``); merge them
+    into ``configurable`` only and drop any stray top-level ``context`` from YAML.
+    """
+    merged_cfg = dict(run_context)
+    nested = run_config.get("configurable")
+    if isinstance(nested, dict):
+        merged_cfg.update(nested)
+    out: dict[str, Any] = {k: v for k, v in run_config.items() if k not in ("configurable", "context")}
+    out["configurable"] = merged_cfg
+    return out
+
+
 def _merge_dicts(*layers: Any) -> dict[str, Any]:
     merged: dict[str, Any] = {}
     for layer in layers:
@@ -784,8 +801,7 @@ class ChannelManager:
             thread_id,
             assistant_id,
             input={"messages": [{"role": "human", "content": msg.text}]},
-            config=run_config,
-            context=run_context,
+            config=_langgraph_sdk_run_config(run_config, run_context),
         )
 
         response_text = _extract_response_text(result)
@@ -842,8 +858,7 @@ class ChannelManager:
                 thread_id,
                 assistant_id,
                 input={"messages": [{"role": "human", "content": msg.text}]},
-                config=run_config,
-                context=run_context,
+                config=_langgraph_sdk_run_config(run_config, run_context),
                 stream_mode=["messages-tuple", "values"],
                 multitask_strategy="reject",
             ):

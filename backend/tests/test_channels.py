@@ -556,9 +556,11 @@ class TestChannelManager:
             call_args = mock_client.runs.wait.call_args
             assert call_args[0][1] == "lead_agent"
             assert call_args[1]["config"]["recursion_limit"] == 55
-            assert call_args[1]["context"]["thinking_enabled"] is False
-            assert call_args[1]["context"]["subagent_enabled"] is True
-            assert call_args[1]["context"]["agent_name"] == "mobile-agent"
+            cfg = call_args[1]["config"]["configurable"]
+            assert cfg["thinking_enabled"] is False
+            assert cfg["subagent_enabled"] is True
+            assert cfg["agent_name"] == "mobile-agent"
+            assert "context" not in call_args[1]
 
         _run(go())
 
@@ -615,10 +617,12 @@ class TestChannelManager:
             call_args = mock_client.runs.wait.call_args
             assert call_args[0][1] == "lead_agent"
             assert call_args[1]["config"]["recursion_limit"] == 77
-            assert call_args[1]["context"]["thinking_enabled"] is True
-            assert call_args[1]["context"]["subagent_enabled"] is True
-            assert call_args[1]["context"]["agent_name"] == "vip-agent"
-            assert call_args[1]["context"]["is_plan_mode"] is True
+            cfg = call_args[1]["config"]["configurable"]
+            assert cfg["thinking_enabled"] is True
+            assert cfg["subagent_enabled"] is True
+            assert cfg["agent_name"] == "vip-agent"
+            assert cfg["is_plan_mode"] is True
+            assert "context" not in call_args[1]
 
         _run(go())
 
@@ -1210,11 +1214,10 @@ class TestChannelManager:
             # The text sent to the agent should be the part after /bootstrap
             assert call_args[1]["input"]["messages"][0]["content"] == "setup my workspace"
 
-            # run_context should contain is_bootstrap=True
-            assert call_args[1]["context"]["is_bootstrap"] is True
-
-            # Normal context fields should still be present
-            assert "thread_id" in call_args[1]["context"]
+            cfg = call_args[1]["config"]["configurable"]
+            assert cfg["is_bootstrap"] is True
+            assert "thread_id" in cfg
+            assert "context" not in call_args[1]
 
             # Should get the agent response (not a command reply)
             assert outbound_received[0].text == "Hello from agent!"
@@ -1258,7 +1261,8 @@ class TestChannelManager:
 
             # Default text should be used when no text is provided
             assert call_args[1]["input"]["messages"][0]["content"] == "Initialize workspace"
-            assert call_args[1]["context"]["is_bootstrap"] is True
+            assert call_args[1]["config"]["configurable"]["is_bootstrap"] is True
+            assert "context" not in call_args[1]
 
         _run(go())
 
@@ -1316,7 +1320,8 @@ class TestChannelManager:
             call_args = mock_client.runs.stream.call_args
 
             assert call_args[1]["input"]["messages"][0]["content"] == "hello"
-            assert call_args[1]["context"]["is_bootstrap"] is True
+            assert call_args[1]["config"]["configurable"]["is_bootstrap"] is True
+            assert "context" not in call_args[1]
 
             # Final message should be published
             final_msgs = [m for m in outbound_received if m.is_final]
